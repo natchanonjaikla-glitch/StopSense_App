@@ -1,0 +1,18 @@
+# Environments
+.env
+.venv/
+env/
+__pycache__/
+
+# AI Models & Media files (ไฟล์ใหญ่ ห้ามอัป)
+*.pt
+*.engine
+*.mp4
+*.avi
+*.mov
+
+# Output files
+output/
+dist/
+build/
+*.spec
