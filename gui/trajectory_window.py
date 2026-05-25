@@ -1,8 +1,6 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import os
-import sys
-import subprocess
 import threading
 
 from core.offline_processor import FutureTrajectoryAnalyzer
@@ -15,7 +13,7 @@ class TrajectoryWindow:
         self.root.configure(bg="#f5f6fa")
         
         self.video_path, self.model_path, self.processor = "", "", None
-        self.output_base_dir = os.path.abspath("output") # ค่าเริ่มต้น
+        self.output_base_dir = os.path.abspath("output")
         
         self.class_vars = {} 
         self.var_lookahead = tk.DoubleVar(value=3.0)
@@ -82,15 +80,19 @@ class TrajectoryWindow:
     def append_log(self, msg):
         self.log_text.config(state=tk.NORMAL); self.log_text.insert(tk.END, msg + "\n"); self.log_text.see(tk.END); self.log_text.config(state=tk.DISABLED)
 
+    # === อัปเดตฟังก์ชันเรียก Dashboard ===
     def open_dashboard(self):
         try:
-            if getattr(sys, 'frozen', False):
-                viewer_path = os.path.join(os.path.dirname(sys.executable), "viewer.exe")
-                subprocess.Popen([viewer_path])
-            else:
-                subprocess.Popen([sys.executable, "gui/viewer.py"])
+            from gui.viewer import DashboardWindow 
+            
+            dash_win = tk.Toplevel(self.root)
+            app = DashboardWindow(dash_win)
+            
+        except ImportError:
+            messagebox.showerror("Error", "ไม่พบคลาส DashboardWindow ในไฟล์ gui/viewer.py\nกรุณาตรวจสอบชื่อคลาสในไฟล์ viewer.py ครับ")
         except Exception as e:
-            messagebox.showerror("Error", f"เปิด Dashboard ไม่ได้: {e}")
+            messagebox.showerror("Error", f"เกิดข้อผิดพลาดในการเปิด Dashboard: {e}")
+    # ====================================
 
     def open_output_folder(self):
         if os.path.exists(self.output_base_dir):
@@ -102,23 +104,26 @@ class TrajectoryWindow:
         path = filedialog.askopenfilename(); self.video_path = path; self.lbl_video.config(text=os.path.basename(path))
 
     def select_model(self):
-        path = filedialog.askopenfilename(); self.model_path = path; self.lbl_model.config(text=os.path.basename(path)); self.load_classes()
+        path = filedialog.askopenfilename(filetypes=[('YOLO Model', '*.pt')]); self.model_path = path; self.lbl_model.config(text=os.path.basename(path)); self.load_classes()
 
     def select_output_dir(self):
         path = filedialog.askdirectory()
         if path: self.output_base_dir = path; self.lbl_output.config(text=path)
 
     def load_classes(self):
-        from ultralytics import YOLO
-        model = YOLO(self.model_path)
-        for widget in self.checkbox_frame.winfo_children(): widget.destroy()
-        self.class_vars = {}
-        r, c = 0, 0
-        for cid, name in model.names.items():
-            var = tk.BooleanVar(value=True); self.class_vars[cid] = var
-            tk.Checkbutton(self.checkbox_frame, text=name, variable=var, bg="#f5f6fa").grid(row=r, column=c, sticky="w", padx=5)
-            c += 1
-            if c > 3: c=0; r+=1
+        try:
+            from ultralytics import YOLO
+            model = YOLO(self.model_path)
+            for widget in self.checkbox_frame.winfo_children(): widget.destroy()
+            self.class_vars = {}
+            r, c = 0, 0
+            for cid, name in model.names.items():
+                var = tk.BooleanVar(value=True); self.class_vars[cid] = var
+                tk.Checkbutton(self.checkbox_frame, text=name, variable=var, bg="#f5f6fa").grid(row=r, column=c, sticky="w", padx=5)
+                c += 1
+                if c > 3: c=0; r+=1
+        except Exception as e:
+            messagebox.showerror("Error", f"โหลดโมเดลไม่สำเร็จ: {e}")
 
     def start_analysis(self):
         selected = [cid for cid, v in self.class_vars.items() if v.get()]

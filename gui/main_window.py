@@ -1,8 +1,6 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import os
-import sys
-import subprocess
 import threading
 
 from core.video_processor import VideoProcessor
@@ -17,7 +15,7 @@ class MainWindow:
         self.video_path = ""
         self.model_path = ""
         self.calibration_path = ""
-        self.output_base_dir = os.path.abspath("output") # ค่าเริ่มต้น
+        self.output_base_dir = os.path.abspath("output") 
         self.processor = None
         self.class_vars = {}
 
@@ -26,7 +24,7 @@ class MainWindow:
         self.var_gap = tk.DoubleVar(value=3.0) 
         self.var_speed_comp = tk.DoubleVar(value=0.0)
         
-        # ตัวแปรสำหรับปรับลูกศร อนาคต
+        # ตัวแปรสำหรับปรับลูกศร
         self.var_arrow_min = tk.IntVar(value=40)
         self.var_arrow_mult = tk.DoubleVar(value=3.0)
 
@@ -133,16 +131,22 @@ class MainWindow:
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
+    # === อัปเดตฟังก์ชันเรียก Dashboard ให้ดึงโค้ดมารันเป็นหน้าต่างย่อย ===
     def open_dashboard(self):
         try:
-            # ตรวจสอบว่ากำลังรันผ่าน exe หรือไม่
-            if getattr(sys, 'frozen', False):
-                viewer_path = os.path.join(os.path.dirname(sys.executable), "viewer.exe")
-                subprocess.Popen([viewer_path])
-            else:
-                subprocess.Popen([sys.executable, "gui/viewer.py"])
+            # สมมติว่าในไฟล์ gui/viewer.py ของคุณ คลาสหลักชื่อว่า DashboardWindow หรือคล้ายกัน
+            # หากชื่อคลาสต่างไปจากนี้ ให้เปลี่ยนชื่อ "DashboardWindow" เป็นชื่อคลาสจริงของคุณครับ
+            from gui.viewer import DashboardWindow 
+            
+            # สร้างหน้าต่างใหม่ที่เชื่อมโยงกับโปรแกรมหลัก
+            dash_win = tk.Toplevel(self.root)
+            app = DashboardWindow(dash_win)
+            
+        except ImportError:
+            messagebox.showerror("Error", "ไม่พบคลาส DashboardWindow ในไฟล์ gui/viewer.py\nกรุณาตรวจสอบชื่อคลาสในไฟล์ viewer.py ครับ")
         except Exception as e:
-            messagebox.showerror("Error", f"เปิด Dashboard ไม่ได้: {e}")
+            messagebox.showerror("Error", f"เกิดข้อผิดพลาดในการเปิด Dashboard: {e}")
+    # ==============================================================
 
     def open_output_folder(self):
         if os.path.exists(self.output_base_dir):
