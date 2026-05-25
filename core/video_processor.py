@@ -4,6 +4,7 @@ import os
 import numpy as np
 import time
 import queue
+import json
 from datetime import datetime 
 from collections import defaultdict, deque
 from ultralytics import YOLO
@@ -59,12 +60,14 @@ def _get_real_direction_vector(direction_vector, homography_matrix, track_points
     if norm == 0: return None
     return real_vx / norm, real_vy / norm
 
-def draw_trajectory_arrow(frame, point, direction_vector, speed_kmh):
+# === [แก้] ฟังก์ชันวาดลูกศร รับพารามิเตอร์จากผู้ใช้งาน ===
+def draw_trajectory_arrow(frame, point, direction_vector, speed_kmh, min_len=40, speed_mult=3.0):
     if direction_vector is None: return
     vx, vy, _, _ = direction_vector
-    arrow_length = max(40, int(speed_kmh * 1.5))
+    arrow_length = max(min_len, int(speed_kmh * speed_mult)) 
     future_point = (int(point[0] + vx * arrow_length), int(point[1] + vy * arrow_length))
-    cv2.arrowedLine(frame, tuple(point), future_point, (255, 255, 0), 2, tipLength=0.2)
+    cv2.arrowedLine(frame, tuple(point), future_point, (255, 255, 0), 3, tipLength=0.2)
+# =========================================================
 
 def _ray_segment_intersection_2d(ox, oy, dx, dy, px, py, ex, ey):
     sx, sy = ex - px, ey - py
@@ -75,7 +78,6 @@ def _ray_segment_intersection_2d(ox, oy, dx, dy, px, py, ex, ey):
     if t >= 0 and 0.0 <= u <= 1.0: return t, u
     return None
 
-# ==================== แก้ไขฟังก์ชันคำนวณ TTC ให้รับพารามิเตอร์จาก UI ====================
 def compute_ttc(point_a, point_b, dir_vec_a, dir_vec_b, speed_a_mps, speed_b_mps, homography_matrix, track_points_a, track_points_b, ttc_threshold, arrival_gap, ttc_lookahead_s):
     if not all([homography_matrix is not None, dir_vec_a, dir_vec_b, speed_a_mps > 0 or speed_b_mps > 0]): return None
     real_a, real_b = transform_point(point_a, homography_matrix), transform_point(point_b, homography_matrix)
@@ -100,32 +102,44 @@ def compute_ttc(point_a, point_b, dir_vec_a, dir_vec_b, speed_a_mps, speed_b_mps
 # ==================== Core Class ====================
 class VideoProcessor:
     def __init__(self, video_path, model_path, calibration_path, output_dir=None, target_classes=None, 
-                 ttc_threshold=3.0, arrival_gap=1.5, ttc_lookahead_s=4.0, frame_skip=1, speed_comp=0.0):
+                 ttc_threshold=3.0, arrival_gap=1.5, ttc_lookahead_s=4.0, frame_skip=1, speed_comp=0.0,
+                 arrow_min_len=40, arrow_speed_mult=3.0): # เพิ่มพารามิเตอร์ 2 ตัวนี้
         self.video_path = video_path
         self.model_path = model_path
         self.calibration_path = calibration_path
-        self.output_dir = output_dir if output_dir else "output"
+        
+        self.base_output_dir = output_dir if output_dir else "output" 
+        self.output_dir = self.base_output_dir
+        
         self.target_classes = target_classes if target_classes is not None else [0, 1, 2, 3, 5, 7]
         self.is_running = False
         self.cap = None
         self.frame_queue = queue.Queue(maxsize=30)
         self.reader_thread = None
+        self.thread = None 
         
-        # เก็บค่าการตั้งค่าจากหน้าต่างโปรแกรม
         self.ttc_threshold = float(ttc_threshold)
         self.arrival_gap = float(arrival_gap)
         self.ttc_lookahead_s = float(ttc_lookahead_s)
         self.frame_skip = int(frame_skip)
         self.speed_comp = float(speed_comp)
+        
+        # เก็บค่าตัวแปรลูกศร
+        self.arrow_min_len = int(arrow_min_len)
+        self.arrow_speed_mult = float(arrow_speed_mult)
+        
+        self.conflict_logs = []
+        self.target_size = None
 
     def start(self):
         self.is_running = True
-        threading.Thread(target=self._run_analysis, daemon=True).start()
+        self.thread = threading.Thread(target=self._run_analysis, daemon=True)
+        self.thread.start()
 
     def stop(self):
         self.is_running = False
 
-    def load_zone_from_txt(self):
+    def load_zone_from_txt(self, scale=1.0):
         zones = []
         try:
             with open(self.calibration_path, 'r', encoding='utf-8') as f:
@@ -146,7 +160,10 @@ class VideoProcessor:
                 for j in range(1, 5):
                     if i + j < len(lines):
                         pts = lines[i+j].split(',')
-                        if len(pts) >= 2: points.append((int(float(pts[0])), int(float(pts[1]))))
+                        if len(pts) >= 2: 
+                            px = int(float(pts[0]) * scale)
+                            py = int(float(pts[1]) * scale)
+                            points.append((px, py))
                 
                 if len(points) == 4:
                     src_points = np.float32(points)
@@ -165,6 +182,10 @@ class VideoProcessor:
             if not self.frame_queue.full():
                 success, frame = self.cap.read()
                 if not success: break
+                
+                if self.target_size:
+                    frame = cv2.resize(frame, self.target_size)
+                    
                 self.frame_queue.put(frame)
             else:
                 time.sleep(0.01)
@@ -180,10 +201,26 @@ class VideoProcessor:
         height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps_original = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
         
+        scale_factor = 1.0
+        if width > 1920:
+            scale_factor = 1920.0 / width
+            width = 1920
+            height = int(height * scale_factor)
+            self.target_size = (width, height)
+            print(f"⚠️ ตรวจพบวิดีโอความละเอียดสูง (4K+) ย่อขนาดเหลือ 1080p เพื่อความรวดเร็ว (Scale: {scale_factor:.2f})")
+        else:
+            self.target_size = None
+
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_folder_name = f"Run_TTC_{timestamp_str}"
+        self.output_dir = os.path.join(self.base_output_dir, run_folder_name)
         os.makedirs(self.output_dir, exist_ok=True)
+
         out_video_path = os.path.join(self.output_dir, "result_video.mp4")
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         video_writer = cv2.VideoWriter(out_video_path, fourcc, fps_original, (width, height))
+
+        ZONES = self.load_zone_from_txt(scale=scale_factor)
 
         self.reader_thread = threading.Thread(target=self._read_frames, daemon=True)
         self.reader_thread.start()
@@ -192,8 +229,6 @@ class VideoProcessor:
         byte_track = sv.ByteTrack(frame_rate=int(fps_original))
         box_annotator = sv.BoxAnnotator(thickness=2)
         label_annotator = sv.LabelAnnotator(text_scale=0.5, text_thickness=1)
-        
-        ZONES = self.load_zone_from_txt()
         
         speed_memory = defaultdict(lambda: deque(maxlen=5))
         direction_memory = defaultdict(lambda: deque(maxlen=60))
@@ -212,6 +247,7 @@ class VideoProcessor:
 
         print("\n" + "="*50)
         print("🚀 เริ่มต้นการประมวลผลวิดีโอ (StopSense AI)")
+        print(f"📁 บันทึกข้อมูลรอบนี้ลงใน: {self.output_dir}")
         print("="*50)
         start_time = time.time()
         processed_frames_count = 0
@@ -259,11 +295,17 @@ class VideoProcessor:
                 in_zone = len(matched_zones) > 0
 
                 direction_memory[tracker_id].append((int(point[0]), int(point[1]), frame_count))
-                _, dir_vec = estimate_direction(direction_memory[tracker_id])
                 
+                track_history = list(direction_memory[tracker_id])
+                if len(track_history) > 1:
+                    pts_history = np.array([(p[0], p[1]) for p in track_history], np.int32).reshape((-1, 1, 2))
+                    cv2.polylines(annotated_frame, [pts_history], isClosed=False, color=(0, 255, 255), thickness=2)
+
+                _, dir_vec = estimate_direction(direction_memory[tracker_id])
                 if dir_vec is not None:
                     cached_dir_vec[tracker_id] = dir_vec
-                    draw_trajectory_arrow(annotated_frame, point, dir_vec, last_speed.get(tracker_id, 0))
+                    # === ส่งค่าความยาวลูกศรไปให้ฟังก์ชันวาด ===
+                    draw_trajectory_arrow(annotated_frame, point, dir_vec, last_speed.get(tracker_id, 0), self.arrow_min_len, self.arrow_speed_mult)
 
                 if in_zone:
                     for zone_idx, zone in matched_zones:
@@ -275,17 +317,13 @@ class VideoProcessor:
                             if real_dist and real_dist > 0:
                                 t_elapsed = (len(speed_memory[key]) - 1) / fps_original
                                 if t_elapsed > 0:
-                                    # === ความเร็วเริ่มต้นที่คำนวณได้จากพิกเซล ===
                                     speed_kmh = (real_dist / t_elapsed) * 3.6
                                     
-                                    # === LOGIC ชดเชยความเร็ว (ตามที่คุณขอ) ===
                                     if speed_kmh < 3.0:
-                                        # ถ้ารถวิ่งช้ากว่า 3 km/h ให้ปัดเป็น 0 เลย (ป้องกันขยะหรือภาพสั่น)
                                         speed_kmh = 0.0
                                     elif speed_kmh >= 15.0:
-                                        # ถ้ารถวิ่งเกิน 15 km/h ให้บวก/ลบ ค่าชดเชยที่ผู้ใช้ตั้งไว้
                                         speed_kmh += self.speed_comp
-                                        if speed_kmh < 0: speed_kmh = 0.0 # ป้องกันความเร็วติดลบ
+                                        if speed_kmh < 0: speed_kmh = 0.0 
 
                                     speed_history[tracker_id].append(speed_kmh)
                                     display_speed = float(np.median(speed_history[tracker_id])) if len(speed_history[tracker_id]) >= 3 else speed_kmh
@@ -315,7 +353,6 @@ class VideoProcessor:
                     dir_a, dir_b = cached_dir_vec.get(id_a), cached_dir_vec.get(id_b)
                     speed_a_mps, speed_b_mps = last_speed.get(id_a, 0.0) / 3.6, last_speed.get(id_b, 0.0) / 3.6
 
-                    # เรียกใช้โดยส่งค่าพารามิเตอร์ของระบบเข้าไปคำนวณด้วย
                     ttc_result = compute_ttc(pt_a, pt_b, dir_a, dir_b, speed_a_mps, speed_b_mps, H, list(direction_memory[id_a]), list(direction_memory[id_b]),
                                              self.ttc_threshold, self.arrival_gap, self.ttc_lookahead_s)
 
@@ -342,6 +379,17 @@ class VideoProcessor:
                                 output_dir=self.output_dir, frame_number=frame_count
                             )
                             risk_cooldown[pair_key] = frame_count
+                            
+                            timestamp_s = round(frame_count / fps_original, 2)
+                            speed_a_kmh = speed_a_mps * 3.6
+                            speed_b_kmh = speed_b_mps * 3.6
+                            self.conflict_logs.append({
+                                "time": f"{timestamp_s} s",
+                                "type": "TTC_RISK",
+                                "zone": zone_name,
+                                "ttc": f"{min_ttc:.2f} s",
+                                "speed": f"{speed_a_kmh:.1f} / {speed_b_kmh:.1f} km/h"
+                            })
 
             if SHOW_FRAME_INFO:
                 minutes, seconds = int(current_time_s // 60), current_time_s % 60
@@ -378,6 +426,10 @@ class VideoProcessor:
         summary_file_path = os.path.join(self.output_dir, "processing_summary.txt")
         with open(summary_file_path, "a", encoding="utf-8") as f:
             f.write(summary_msg)
+            
+        log_json_path = os.path.join(self.output_dir, "conflict_log.json")
+        with open(log_json_path, "w", encoding="utf-8") as f:
+            json.dump(self.conflict_logs, f, ensure_ascii=False, indent=4)
 
         while not self.frame_queue.empty(): self.frame_queue.get()
         if self.cap: self.cap.release()

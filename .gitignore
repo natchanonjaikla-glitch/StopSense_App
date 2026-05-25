@@ -1,18 +1,27 @@
 # Environments
-.env
 .venv/
+venv/
 env/
-__pycache__/
 
-# AI Models & Media files (ไฟล์ใหญ่ ห้ามอัป)
+# Python Cache
+__pycache__/
+*.pyc
+
+# PyInstaller / Build artifacts
+build/
+dist/
+*.spec
+
+# AI Models
 *.pt
-*.engine
+*.onnx
+
+# Media & Output Files
 *.mp4
 *.avi
 *.mov
-
-# Output files
 output/
-dist/
-build/
-*.spec
+
+# Logs & Configs
+*.log
+.vscode/
