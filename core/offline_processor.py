@@ -33,7 +33,7 @@ class FutureTrajectoryAnalyzer:
                  log_callback=None, calc_parallel=True):
         self.video_path = video_path
         self.model_path = model_path
-        self.calibration_path = calibration_path # เพิ่มตัวรับไฟล์ Zone
+        self.calibration_path = calibration_path
         self.base_output_dir = output_dir 
         self.lookahead_s = lookahead_s      
         self.proximity_px = proximity_px    
@@ -102,6 +102,8 @@ class FutureTrajectoryAnalyzer:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
         lookahead_frames = int(self.lookahead_s * fps)
+        time_gap_frames = int(2.0 * fps) # กำหนดเวลาเฉียดชนที่ยอมรับได้คือ 2 วินาที (2.0 * fps)
+        
         model = YOLO(self.model_path)
         byte_track = sv.ByteTrack(frame_rate=int(fps))
         
@@ -118,7 +120,7 @@ class FutureTrajectoryAnalyzer:
             success, frame = cap.read()
             if not success: break
             frame_idx += 1
-            results = model.predict(frame, classes=self.target_classes, verbose=False, conf=0.5)[0]
+            results = model.predict(frame, classes=self.target_classes, verbose=False, conf=0.5, iou=0.45)[0]
             detections = sv.Detections.from_ultralytics(results)
             detections = byte_track.update_with_detections(detections)
             points = detections.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER).astype(int)
@@ -149,35 +151,84 @@ class FutureTrajectoryAnalyzer:
             frame_idx += 1
             current_objects = [tid for tid, frames in self.history_positions.items() if frame_idx in frames]
             
-            # วาดกรอบ Zone (ถ้ามี)
+            conflicting_tids = set()
+            events_to_log = []
+
+            # 1. แอบเช็ควิเคราะห์จุดตัดล่วงหน้า (เงื่อนไขใหม่: ห่างกันไม่เกิน 2 วิ ให้นับหมด)
+            for i in range(len(current_objects)):
+                for j in range(i + 1, len(current_objects)):
+                    id_a, id_b = current_objects[i], current_objects[j]
+                    conflict_found, conflict_type, min_distance, conflict_pt = False, "", float('inf'), None
+                    
+                    # หาเฟรมอนาคตทั้งหมดของรถ A (จำกัดแค่ใน lookahead)
+                    future_f_a = [f for f in range(frame_idx, frame_idx + lookahead_frames) if f in self.history_positions[id_a]]
+                    
+                    for f_a in future_f_a:
+                        pt_a = self.history_positions[id_a][f_a]
+                        
+                        # ให้รถ B เช็คในกรอบเวลา (เฟรมของ A - 2 วิ) ถึง (เฟรมของ A + 2 วิ)
+                        f_b_start = max(frame_idx, f_a - time_gap_frames)
+                        f_b_end = min(frame_idx + lookahead_frames, f_a + time_gap_frames)
+                        
+                        for f_b in range(f_b_start, f_b_end + 1):
+                            if f_b in self.history_positions[id_b]:
+                                pt_b = self.history_positions[id_b][f_b]
+                                dist = self._euclidean_distance(pt_a, pt_b)
+                                
+                                if dist < min_distance:
+                                    min_distance = dist
+                                    conflict_pt = pt_a 
+                                
+                                if dist < self.proximity_px:
+                                    if dist < 20.0:
+                                        conflict_found, conflict_type = True, "CROSSING"
+                                        break
+                                    elif self.calc_parallel and conflict_type != "CROSSING": 
+                                        conflict_found, conflict_type = True, "PROXIMITY"
+                                        
+                        if conflict_found and conflict_type == "CROSSING":
+                            break # เจอเคสหนักสุด (ตัดกัน) แล้ว ให้ออกจากลูปเช็คของคู่นี้เลย
+                    
+                    if conflict_found:
+                        conflicting_tids.add(id_a)
+                        conflicting_tids.add(id_b)
+                        pair_key = tuple(sorted([id_a, id_b]))
+                        
+                        if (frame_idx - risk_cooldown.get(pair_key, -999) > fps * 3): 
+                            risk_cooldown[pair_key] = frame_idx
+                            events_to_log.append({
+                                'id_a': id_a, 'id_b': id_b,
+                                'type': conflict_type, 'dist': min_distance, 'pt': conflict_pt
+                            })
+
+            # 2. วาดกรอบ Zone (ถ้ามี)
             for zone in ZONES:
                 cv2.polylines(frame, [zone['polygon']], True, (0, 255, 255), 2)
                 cx, cy = int(zone['polygon'][:, 0].mean()), int(zone['polygon'][:, 1].mean())
                 cv2.putText(frame, zone['name'], (cx-40, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
 
-            # วาดเส้นทางล่วงหน้า และ คำนวณความเร็ว
+            # 3. วาดเส้นทางล่วงหน้า (ถ้าอยู่ในกลุ่มที่ชน/เฉียดใน 2 วิ เปลี่ยนเป็นสีแดง)
             for tid in current_objects:
                 curr_pt = self.history_positions[tid][frame_idx]
                 
-                # 1. วาดเส้นทางอนาคตล่วงหน้า
+                line_color = (0, 0, 255) if tid in conflicting_tids else (0, 255, 0)
+                
                 future_path = []
                 for f in range(frame_idx, frame_idx + lookahead_frames, 3): 
                     if f in self.history_positions[tid]:
                         future_path.append(self.history_positions[tid][f])
                 if len(future_path) > 1:
                     pts = np.array(future_path, np.int32).reshape((-1, 1, 2))
-                    cv2.polylines(frame, [pts], False, (0, 255, 0), 2)
+                    cv2.polylines(frame, [pts], False, line_color, 2)
                     end_pt = future_path[-1]
-                    cv2.circle(frame, end_pt, 5, (0, 255, 0), -1)
+                    cv2.circle(frame, end_pt, 5, line_color, -1)
 
-                # 2. เช็คว่าอยู่ใน Zone ไหม เพื่อคำนวณความเร็ว
+                # คำนวณความเร็ว (เช็คว่าอยู่ใน Zone ไหม)
                 for zone in ZONES:
                     if is_point_in_polygon(curr_pt, zone['polygon']):
-                        # หาระยะห่างย้อนหลัง 1 วินาที (ตามค่า fps) เพื่อความเสถียร
                         past_frame = max(1, frame_idx - int(fps))
                         past_pt = self.history_positions[tid].get(past_frame)
                         
-                        # ถ้าไม่มีจุดเป๊ะๆ ให้หาจุดอดีตที่ใกล้เคียงที่สุด
                         if not past_pt:
                             for f in range(frame_idx - 1, max(0, frame_idx - int(fps*1.5)), -1):
                                 if f in self.history_positions[tid]:
@@ -191,70 +242,52 @@ class FutureTrajectoryAnalyzer:
                                 t_elapsed = (frame_idx - past_frame) / fps
                                 if t_elapsed > 0:
                                     speed_kmh = (real_dist / t_elapsed) * 3.6
-                                    if speed_kmh > 3.0: # กรอง noise รถจอดนิ่ง
+                                    if speed_kmh > 3.0: 
                                         cv2.putText(frame, f"{speed_kmh:.1f} km/h", (curr_pt[0]-30, curr_pt[1]-20), 
                                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                        break # ตีว่าอยู่ 1 โซนต่อคันก็พอ
+                        break
 
-            # วิเคราะห์จุดตัดล่วงหน้า (Crossing / Proximity) โดยไม่เอา Zone/ความเร็ว มาเกี่ยว
-            for i in range(len(current_objects)):
-                for j in range(i + 1, len(current_objects)):
-                    id_a, id_b = current_objects[i], current_objects[j]
-                    conflict_found, conflict_type, min_distance, conflict_pt = False, "", float('inf'), None
-                    
-                    for f in range(frame_idx, frame_idx + lookahead_frames):
-                        if f in self.history_positions[id_a] and f in self.history_positions[id_b]:
-                            pt_a, pt_b = self.history_positions[id_a][f], self.history_positions[id_b][f]
-                            dist = self._euclidean_distance(pt_a, pt_b)
-                            if dist < min_distance:
-                                min_distance, conflict_pt = dist, pt_a 
-                            if dist < self.proximity_px:
-                                if dist < 20.0:
-                                    conflict_found, conflict_type = True, "CROSSING"
-                                    break
-                                elif self.calc_parallel: # ถ้าติ๊กให้คิดประชิดด้วย
-                                    conflict_found, conflict_type = True, "PROXIMITY"
-                                    break
-                    
-                    pair_key = tuple(sorted([id_a, id_b]))
-                    if conflict_found and (frame_idx - risk_cooldown.get(pair_key, -999) > fps * 3): 
-                        risk_cooldown[pair_key] = frame_idx
-                        pt_a_curr, pt_b_curr = self.history_positions[id_a][frame_idx], self.history_positions[id_b][frame_idx]
-                        cv2.line(frame, pt_a_curr, pt_b_curr, (0, 0, 255), 2)
-                        
-                        if conflict_pt:
-                            cv2.circle(frame, conflict_pt, 30, (0, 0, 255), 2)
-                            cv2.putText(frame, conflict_type, (conflict_pt[0]-50, conflict_pt[1]-40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        
-                        timestamp_s = round(frame_idx / fps, 2)
-                        self.log(f"⚠️ [Time: {timestamp_s}s] Risk: {conflict_type} (ID:{id_a} & ID:{id_b})")
-                        
-                        cls_a = self.history_classes.get(id_a, "N/A")
-                        cls_b = self.history_classes.get(id_b, "N/A")
+            # 4. วาดมาร์กเกอร์จุดชน และ บันทึกรูปลง Dashboard
+            for ev in events_to_log:
+                id_a, id_b = ev['id_a'], ev['id_b']
+                c_type, min_dist, c_pt = ev['type'], ev['dist'], ev['pt']
 
-                        self.conflict_logs.append({
-                            "time": timestamp_s,
-                            "type": conflict_type,
-                            "obj_a": cls_a,
-                            "obj_b": cls_b,
-                            "distance": round(min_distance, 1),
-                            "mode": "OFFLINE"
-                        })
+                pt_a_curr, pt_b_curr = self.history_positions[id_a][frame_idx], self.history_positions[id_b][frame_idx]
+                cv2.line(frame, pt_a_curr, pt_b_curr, (0, 0, 255), 2)
+                
+                if c_pt:
+                    cv2.circle(frame, c_pt, 30, (0, 0, 255), 2)
+                    cv2.putText(frame, f"{c_type} (Gap <= 2s)", (c_pt[0]-50, c_pt[1]-40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                
+                timestamp_s = round(frame_idx / fps, 2)
+                self.log(f"⚠️ [Time: {timestamp_s}s] Risk: {c_type} (Gap <= 2s) (ID:{id_a} & ID:{id_b})")
+                
+                cls_a = self.history_classes.get(id_a, "N/A")
+                cls_b = self.history_classes.get(id_b, "N/A")
 
-                        handle_risk_event(
-                            tracker_id_a=id_a,
-                            tracker_id_b=id_b,
-                            class_name_a=cls_a,
-                            class_name_b=cls_b,
-                            event_type=f"FUTURE_{conflict_type}",
-                            metric_value=min_distance,
-                            zone_name="Offline_Scan",
-                            save_log=True,
-                            save_frame=True,
-                            frame=frame.copy(),
-                            output_dir=self.current_run_dir,
-                            frame_number=frame_idx
-                        )
+                self.conflict_logs.append({
+                    "time": timestamp_s,
+                    "type": c_type,
+                    "obj_a": cls_a,
+                    "obj_b": cls_b,
+                    "distance": round(min_dist, 1),
+                    "mode": "OFFLINE"
+                })
+
+                handle_risk_event(
+                    tracker_id_a=id_a,
+                    tracker_id_b=id_b,
+                    class_name_a=cls_a,
+                    class_name_b=cls_b,
+                    event_type=f"FUTURE_{c_type}",
+                    metric_value=min_dist,
+                    zone_name="Offline_Scan",
+                    save_log=True,
+                    save_frame=True,
+                    frame=frame.copy(),
+                    output_dir=self.current_run_dir,
+                    frame_number=frame_idx
+                )
 
             cv2.imshow("StopSense - Future Trajectory", frame)
             video_writer.write(frame)
