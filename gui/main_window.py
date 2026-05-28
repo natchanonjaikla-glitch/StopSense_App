@@ -9,7 +9,7 @@ class MainWindow:
     def __init__(self, root):
         self.root = root
         self.root.title("StopSense - Traffic Collision Risk Detection System")
-        self.root.geometry("900x850") # ขยายหน้าต่างแนวตั้งให้รองรับเมนูใหม่
+        self.root.geometry("900x850") 
         self.root.configure(bg="#f5f6fa")
         self.root.minsize(850, 750)
         
@@ -25,6 +25,7 @@ class MainWindow:
         self.var_lookahead = tk.DoubleVar(value=4.0)
         self.var_skip = tk.IntVar(value=1)
         self.var_speed_comp = tk.DoubleVar(value=0.0)
+        self.var_conf = tk.DoubleVar(value=0.50) # [เพิ่มใหม่] ตัวแปรความมั่นใจโมเดล AI
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self._create_widgets()
@@ -64,7 +65,7 @@ class MainWindow:
         self.btn_draw_zone = tk.Button(file_lf, text="✏️ วาด Zone เอง", command=self.draw_custom_zones, width=14, bg="#0984e3", fg="white", font=("Helvetica", 9, "bold"))
         self.btn_draw_zone.grid(row=2, column=3, pady=3, padx=(5,0))
 
-        # === NEW กรอบที่ 2: ตั้งค่าพารามิเตอร์ระบบ ===
+        # === กรอบที่ 2: ตั้งค่าพารามิเตอร์ระบบ ===
         param_lf = tk.LabelFrame(main_container, text=" 2. ตั้งค่าพารามิเตอร์ (Advanced Settings) ", font=("Helvetica", 11, "bold"), bg="#f5f6fa", padx=15, pady=10)
         param_lf.pack(fill=tk.X, pady=5)
 
@@ -79,6 +80,7 @@ class MainWindow:
         add_param_row(param_lf, 2, "TTC_LOOKAHEAD_S :", self.var_lookahead, 8, "มองล่วงหน้า (วิ) - ความยาวเส้นลูกศรเพื่อหาจุดตัดอนาคต")
         add_param_row(param_lf, 3, "FRAME_SKIP :", self.var_skip, 8, "ข้ามเฟรม - (1=วิเคราะห์ทุกเฟรมลื่นสุด, 2=ข้าม1เฟรมเพื่อลดกระตุก)")
         add_param_row(param_lf, 4, "ชดเชยความเร็ว (+/-) :", self.var_speed_comp, 8, "กม./ชม. - (บวกเพิ่มเมื่อรถวิ่ง > 15 km/h, ตัดเป็น 0 หากวิ่ง < 3 km/h)")
+        add_param_row(param_lf, 5, "CONFIDENCE_THRESHOLD :", self.var_conf, 8, "ความมั่นใจโมเดล (0.0 - 1.0) - เกณฑ์ขั้นต่ำในการกรองและแสดงผลวัตถุที่ตรวจจับ") # [เพิ่มใหม่] แถวตั้งค่า Conf
 
         # === กรอบที่ 3: เลือกวัตถุที่ต้องการตรวจจับ ===
         self.class_lf = tk.LabelFrame(main_container, text=" 3. เลือกวัตถุที่ต้องการตรวจจับ (โหลดอัตโนมัติ) ", font=("Helvetica", 11, "bold"), bg="#f5f6fa", padx=10, pady=5)
@@ -238,7 +240,7 @@ class MainWindow:
         
         self.status_var.set("สถานะ: ระบบกำลังประมวลผลวิดีโอ...")
         
-        # === NEW: ดึงค่าจากหน้าต่าง UI ไปให้ระบบวิเคราะห์ ===
+        # === ส่งพารามิเตอร์ conf_threshold ไปใช้งานร่วมกับ VideoProcessor ===
         self.processor = VideoProcessor(
             self.video_path, 
             self.model_path, 
@@ -248,7 +250,8 @@ class MainWindow:
             arrival_gap=self.var_gap.get(),
             ttc_lookahead_s=self.var_lookahead.get(),
             frame_skip=self.var_skip.get(),
-            speed_comp=self.var_speed_comp.get()
+            speed_comp=self.var_speed_comp.get(),
+            conf_threshold=self.var_conf.get() # [เพิ่มใหม่] ส่งต่อตัวแปร Confidence
         )
         self.processor.start()
 

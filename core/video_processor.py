@@ -60,14 +60,12 @@ def _get_real_direction_vector(direction_vector, homography_matrix, track_points
     if norm == 0: return None
     return real_vx / norm, real_vy / norm
 
-# === [แก้] ฟังก์ชันวาดลูกศร รับพารามิเตอร์จากผู้ใช้งาน ===
 def draw_trajectory_arrow(frame, point, direction_vector, speed_kmh, min_len=40, speed_mult=3.0):
     if direction_vector is None: return
     vx, vy, _, _ = direction_vector
     arrow_length = max(min_len, int(speed_kmh * speed_mult)) 
     future_point = (int(point[0] + vx * arrow_length), int(point[1] + vy * arrow_length))
     cv2.arrowedLine(frame, tuple(point), future_point, (255, 255, 0), 3, tipLength=0.2)
-# =========================================================
 
 def _ray_segment_intersection_2d(ox, oy, dx, dy, px, py, ex, ey):
     sx, sy = ex - px, ey - py
@@ -103,7 +101,7 @@ def compute_ttc(point_a, point_b, dir_vec_a, dir_vec_b, speed_a_mps, speed_b_mps
 class VideoProcessor:
     def __init__(self, video_path, model_path, calibration_path, output_dir=None, target_classes=None, 
                  ttc_threshold=3.0, arrival_gap=1.5, ttc_lookahead_s=4.0, frame_skip=1, speed_comp=0.0,
-                 arrow_min_len=40, arrow_speed_mult=3.0): # เพิ่มพารามิเตอร์ 2 ตัวนี้
+                 arrow_min_len=40, arrow_speed_mult=3.0, conf_threshold=0.50): # [เพิ่มใหม่] พารามิเตอร์ conf_threshold
         self.video_path = video_path
         self.model_path = model_path
         self.calibration_path = calibration_path
@@ -123,8 +121,8 @@ class VideoProcessor:
         self.ttc_lookahead_s = float(ttc_lookahead_s)
         self.frame_skip = int(frame_skip)
         self.speed_comp = float(speed_comp)
+        self.conf_threshold = float(conf_threshold) # [เพิ่มใหม่] เก็บค่า Confidence ขีดเริ่มเปลี่ยน
         
-        # เก็บค่าตัวแปรลูกศร
         self.arrow_min_len = int(arrow_min_len)
         self.arrow_speed_mult = float(arrow_speed_mult)
         
@@ -269,7 +267,8 @@ class VideoProcessor:
                 if cv2.waitKey(1) & 0xFF == ord('q'): break
                 continue
 
-            results = model.predict(source=frame, classes=self.target_classes, stream=True, conf=0.50, imgsz=640, verbose=False)
+            # === [อัปเดตบรรทัดนี้] ใช้ค่า self.conf_threshold เพื่อปรับความมั่นใจผ่านอินเตอร์เฟซได้โดยตรง ===
+            results = model.predict(source=frame, classes=self.target_classes, stream=True, conf=self.conf_threshold, imgsz=640, verbose=False)
             result = next(results)
 
             detections = sv.Detections.from_ultralytics(result)
@@ -304,7 +303,6 @@ class VideoProcessor:
                 _, dir_vec = estimate_direction(direction_memory[tracker_id])
                 if dir_vec is not None:
                     cached_dir_vec[tracker_id] = dir_vec
-                    # === ส่งค่าความยาวลูกศรไปให้ฟังก์ชันวาด ===
                     draw_trajectory_arrow(annotated_frame, point, dir_vec, last_speed.get(tracker_id, 0), self.arrow_min_len, self.arrow_speed_mult)
 
                 if in_zone:

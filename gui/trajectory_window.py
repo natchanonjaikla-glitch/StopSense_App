@@ -19,7 +19,10 @@ class TrajectoryWindow:
         self.class_vars = {} 
         self.var_lookahead = tk.DoubleVar(value=3.0)
         self.var_proximity = tk.DoubleVar(value=80.0)
-        self.var_calc_parallel = tk.BooleanVar(value=True)
+        self.var_calc_parallel = tk.BooleanVar(value=False)
+        self.var_frame_skip = tk.IntVar(value=1)      # [ตั้งค่า] ข้ามเฟรม
+        self.var_conf = tk.DoubleVar(value=0.50)      # [ตั้งค่า] ความมั่นใจโมเดล
+        
         self._create_widgets()
 
     def _create_widgets(self):
@@ -64,9 +67,17 @@ class TrajectoryWindow:
         # === กรอบที่ 2: ตั้งค่า ===
         param_lf = tk.LabelFrame(main, text=" 2. ตั้งค่า ", font=("Helvetica", 11, "bold"), bg="#f5f6fa", padx=15, pady=10)
         param_lf.pack(fill=tk.X, pady=5)
-        tk.Label(param_lf, text="ดูล่วงหน้า (วิ):", bg="#f5f6fa").grid(row=0, column=0, sticky="w")
-        tk.Entry(param_lf, textvariable=self.var_lookahead, width=8).grid(row=0, column=1, padx=10)
-        tk.Checkbutton(param_lf, text="คำนวณระยะประชิดด้วย (ขนานกัน)", variable=self.var_calc_parallel, bg="#f5f6fa").grid(row=1, column=0, columnspan=2, sticky="w")
+        
+        tk.Label(param_lf, text="ดูล่วงหน้า (วิ):", bg="#f5f6fa").grid(row=0, column=0, sticky="w", pady=2)
+        tk.Entry(param_lf, textvariable=self.var_lookahead, width=8).grid(row=0, column=1, padx=10, pady=2)
+        
+        tk.Label(param_lf, text="ข้ามเฟรม (Frame Skip):", bg="#f5f6fa").grid(row=1, column=0, sticky="w", pady=2)
+        tk.Entry(param_lf, textvariable=self.var_frame_skip, width=8).grid(row=1, column=1, padx=10, pady=2)
+        
+        tk.Label(param_lf, text="ความมั่นใจโมเดล (Conf):", bg="#f5f6fa").grid(row=2, column=0, sticky="w", pady=2)
+        tk.Entry(param_lf, textvariable=self.var_conf, width=8).grid(row=2, column=1, padx=10, pady=2)
+
+        tk.Checkbutton(param_lf, text="คำนวณระยะประชิดด้วย (ขนานกัน)", variable=self.var_calc_parallel, bg="#f5f6fa").grid(row=3, column=0, columnspan=2, sticky="w", pady=2)
 
         # === กรอบที่ 3: วัตถุที่ตรวจจับ ===
         self.class_lf = tk.LabelFrame(main, text=" 3. วัตถุที่ตรวจจับ ", font=("Helvetica", 11, "bold"), bg="#f5f6fa", height=180)
@@ -218,7 +229,9 @@ class TrajectoryWindow:
             output_dir=self.output_base_dir, 
             target_classes=selected, 
             log_callback=self.append_log, 
-            calc_parallel=self.var_calc_parallel.get()
+            calc_parallel=self.var_calc_parallel.get(),
+            frame_skip=self.var_frame_skip.get(),     # ส่งค่า frame skip ไปให้ตัววิเคราะห์
+            conf_threshold=self.var_conf.get()        # ส่งค่าโมเดล conf ไปให้ตัววิเคราะห์
         )
         self.log_text.config(state=tk.NORMAL)
         self.log_text.delete("1.0", tk.END)

@@ -30,7 +30,8 @@ def is_point_in_polygon(point, polygon):
 class FutureTrajectoryAnalyzer:
     def __init__(self, video_path, model_path, calibration_path="", output_dir="output", 
                  lookahead_s=3.0, proximity_px=80.0, target_classes=None,
-                 log_callback=None, calc_parallel=True):
+                 log_callback=None, calc_parallel=True,
+                 frame_skip=1, conf_threshold=0.5):
         self.video_path = video_path
         self.model_path = model_path
         self.calibration_path = calibration_path
@@ -40,6 +41,9 @@ class FutureTrajectoryAnalyzer:
         self.target_classes = target_classes if target_classes else [0, 1, 2, 3, 5, 7]
         self.log_callback = log_callback
         self.calc_parallel = calc_parallel
+        
+        self.frame_skip = frame_skip
+        self.conf_threshold = conf_threshold
         
         self.history_positions = defaultdict(dict) 
         self.history_classes = {}                  
@@ -120,7 +124,13 @@ class FutureTrajectoryAnalyzer:
             success, frame = cap.read()
             if not success: break
             frame_idx += 1
-            results = model.predict(frame, classes=self.target_classes, verbose=False, conf=0.5, iou=0.45)[0]
+            
+            # การข้ามเฟรมในการสแกนข้อมูลเพื่อประหยัดเวลา
+            if frame_idx % self.frame_skip != 0:
+                continue
+                
+            # ปรับใช้ Confidence ตามพารามิเตอร์ที่รับมา
+            results = model.predict(frame, classes=self.target_classes, verbose=False, conf=self.conf_threshold, iou=0.45)[0]
             detections = sv.Detections.from_ultralytics(results)
             detections = byte_track.update_with_detections(detections)
             points = detections.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER).astype(int)
@@ -149,7 +159,12 @@ class FutureTrajectoryAnalyzer:
             success, frame = cap.read()
             if not success: break
             frame_idx += 1
-            current_objects = [tid for tid, frames in self.history_positions.items() if frame_idx in frames]
+            
+            # ดึง Object ในปัจจุบัน (เช็คเฟรมที่ตรวจจับเจอก่อนและหลัง หากใช้ frame_skip)
+            current_objects = []
+            for tid, frames in self.history_positions.items():
+                if frame_idx in frames or any(abs(f - frame_idx) <= self.frame_skip for f in frames):
+                    current_objects.append(tid)
             
             conflicting_tids = set()
             events_to_log = []
@@ -209,12 +224,23 @@ class FutureTrajectoryAnalyzer:
 
             # 3. วาดเส้นทางล่วงหน้า (ถ้าอยู่ในกลุ่มที่ชน/เฉียดใน 2 วิ เปลี่ยนเป็นสีแดง)
             for tid in current_objects:
-                curr_pt = self.history_positions[tid][frame_idx]
+                # ดึงตำแหน่งปัจจุบันแบบรองรับ frame_skip (หาตำแหน่งที่ใกล้เคียงที่สุดถ้าเฟรมปัจจุบันถูกข้ามไป)
+                curr_pt = None
+                for offset in range(self.frame_skip + 1):
+                    if frame_idx - offset in self.history_positions[tid]:
+                        curr_pt = self.history_positions[tid][frame_idx - offset]
+                        break
+                    if frame_idx + offset in self.history_positions[tid]:
+                        curr_pt = self.history_positions[tid][frame_idx + offset]
+                        break
+                        
+                if not curr_pt:
+                    continue
                 
                 line_color = (0, 0, 255) if tid in conflicting_tids else (0, 255, 0)
                 
                 future_path = []
-                for f in range(frame_idx, frame_idx + lookahead_frames, 3): 
+                for f in range(frame_idx, frame_idx + lookahead_frames, max(3, self.frame_skip)): 
                     if f in self.history_positions[tid]:
                         future_path.append(self.history_positions[tid][f])
                 if len(future_path) > 1:
@@ -252,8 +278,19 @@ class FutureTrajectoryAnalyzer:
                 id_a, id_b = ev['id_a'], ev['id_b']
                 c_type, min_dist, c_pt = ev['type'], ev['dist'], ev['pt']
 
-                pt_a_curr, pt_b_curr = self.history_positions[id_a][frame_idx], self.history_positions[id_b][frame_idx]
-                cv2.line(frame, pt_a_curr, pt_b_curr, (0, 0, 255), 2)
+                # หาตำแหน่งล่าสุดของวัตถุทั้งสอง
+                pt_a_curr, pt_b_curr = None, None
+                for offset in range(self.frame_skip + 1):
+                    if frame_idx - offset in self.history_positions[id_a]:
+                        pt_a_curr = self.history_positions[id_a][frame_idx - offset]
+                        break
+                for offset in range(self.frame_skip + 1):
+                    if frame_idx - offset in self.history_positions[id_b]:
+                        pt_b_curr = self.history_positions[id_b][frame_idx - offset]
+                        break
+                        
+                if pt_a_curr and pt_b_curr:
+                    cv2.line(frame, pt_a_curr, pt_b_curr, (0, 0, 255), 2)
                 
                 if c_pt:
                     cv2.circle(frame, c_pt, 30, (0, 0, 255), 2)
