@@ -18,7 +18,7 @@ class TrajectoryWindow:
         
         self.class_vars = {} 
         self.var_lookahead = tk.DoubleVar(value=3.0)
-        self.var_proximity = tk.DoubleVar(value=80.0)
+        self.var_proximity = tk.DoubleVar(value=80.0) # [ตั้งค่า] ระยะห่างระหว่างเส้นคู่ขนานหน้ารถ
         self.var_calc_parallel = tk.BooleanVar(value=False)
         self.var_frame_skip = tk.IntVar(value=1)      # [ตั้งค่า] ข้ามเฟรม
         self.var_conf = tk.DoubleVar(value=0.50)      # [ตั้งค่า] ความมั่นใจโมเดล
@@ -77,7 +77,11 @@ class TrajectoryWindow:
         tk.Label(param_lf, text="ความมั่นใจโมเดล (Conf):", bg="#f5f6fa").grid(row=2, column=0, sticky="w", pady=2)
         tk.Entry(param_lf, textvariable=self.var_conf, width=8).grid(row=2, column=1, padx=10, pady=2)
 
-        tk.Checkbutton(param_lf, text="คำนวณระยะประชิดด้วย (ขนานกัน)", variable=self.var_calc_parallel, bg="#f5f6fa").grid(row=3, column=0, columnspan=2, sticky="w", pady=2)
+        # เพิ่มเมนูตั้งค่าระยะห่างเส้นขนาน
+        tk.Label(param_lf, text="ระยะห่างเส้นขนาน (px):", bg="#f5f6fa").grid(row=3, column=0, sticky="w", pady=2)
+        tk.Entry(param_lf, textvariable=self.var_proximity, width=8).grid(row=3, column=1, padx=10, pady=2)
+
+        tk.Checkbutton(param_lf, text="คำนวณระยะประชิดด้วย (ขนานกัน)", variable=self.var_calc_parallel, bg="#f5f6fa").grid(row=4, column=0, columnspan=2, sticky="w", pady=2)
 
         # === กรอบที่ 3: วัตถุที่ตรวจจับ ===
         self.class_lf = tk.LabelFrame(main, text=" 3. วัตถุที่ตรวจจับ ", font=("Helvetica", 11, "bold"), bg="#f5f6fa", height=180)
@@ -230,8 +234,9 @@ class TrajectoryWindow:
             target_classes=selected, 
             log_callback=self.append_log, 
             calc_parallel=self.var_calc_parallel.get(),
-            frame_skip=self.var_frame_skip.get(),     # ส่งค่า frame skip ไปให้ตัววิเคราะห์
-            conf_threshold=self.var_conf.get()        # ส่งค่าโมเดล conf ไปให้ตัววิเคราะห์
+            frame_skip=self.var_frame_skip.get(),     
+            conf_threshold=self.var_conf.get(),        
+            proximity_px=self.var_proximity.get()      # ส่งค่าระยะห่าง (Proximity) ไปคำนวณ
         )
         self.log_text.config(state=tk.NORMAL)
         self.log_text.delete("1.0", tk.END)

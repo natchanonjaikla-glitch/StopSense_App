@@ -46,6 +46,8 @@ class FutureTrajectoryAnalyzer:
         self.conf_threshold = conf_threshold
         
         self.history_positions = defaultdict(dict) 
+        self.history_bboxes = defaultdict(dict)       # เพิ่ม: สำหรับเก็บพิกัดกรอบ (BBox) ของแต่ละเฟรม
+        self.history_confidences = defaultdict(dict)  # เพิ่ม: สำหรับเก็บค่าความมั่นใจ (Confidence) ของแต่ละเฟรม
         self.history_classes = {}                  
         self.conflict_logs = []
 
@@ -135,10 +137,14 @@ class FutureTrajectoryAnalyzer:
             detections = byte_track.update_with_detections(detections)
             points = detections.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER).astype(int)
             
-            for tid, cid, pt in zip(detections.tracker_id, detections.class_id, points):
+            # ดึงข้อมูล Confidence สำรองไว้กรณีที่ตรวจไม่พบค่าความมั่นใจ
+            confidences = detections.confidence if detections.confidence is not None else [1.0] * len(detections.tracker_id)
+            for tid, cid, pt, bbox, conf in zip(detections.tracker_id, detections.class_id, points, detections.xyxy, confidences):
                 if tid is not None:
                     self.history_positions[tid][frame_idx] = (pt[0], pt[1])
                     self.history_classes[tid] = model.names[cid]
+                    self.history_bboxes[tid][frame_idx] = bbox.astype(int)  # บันทึกพิกัดกลอบสี่เหลี่ยมไว้
+                    self.history_confidences[tid][frame_idx] = float(conf)  # บันทึกค่าความมั่นใจโมเดลไว้
                     
             if frame_idx % 100 == 0:
                 self.log(f"สแกนข้อมูล: เฟรม {frame_idx}/{total_frames} ({(frame_idx/total_frames)*100:.1f}%)")
@@ -226,12 +232,18 @@ class FutureTrajectoryAnalyzer:
             for tid in current_objects:
                 # ดึงตำแหน่งปัจจุบันแบบรองรับ frame_skip (หาตำแหน่งที่ใกล้เคียงที่สุดถ้าเฟรมปัจจุบันถูกข้ามไป)
                 curr_pt = None
+                curr_bbox = None
+                curr_conf = None
                 for offset in range(self.frame_skip + 1):
                     if frame_idx - offset in self.history_positions[tid]:
                         curr_pt = self.history_positions[tid][frame_idx - offset]
+                        curr_bbox = self.history_bboxes[tid].get(frame_idx - offset)
+                        curr_conf = self.history_confidences[tid].get(frame_idx - offset)
                         break
                     if frame_idx + offset in self.history_positions[tid]:
                         curr_pt = self.history_positions[tid][frame_idx + offset]
+                        curr_bbox = self.history_bboxes[tid].get(frame_idx + offset)
+                        curr_conf = self.history_confidences[tid].get(frame_idx + offset)
                         break
                         
                 if not curr_pt:
@@ -239,6 +251,22 @@ class FutureTrajectoryAnalyzer:
                 
                 line_color = (0, 0, 255) if tid in conflicting_tids else (0, 255, 0)
                 
+                # --- เพิ่ม: ส่วนการตีกรอบ Bounding Box และแสดงผล % ความมั่นใจโมเดล ---
+                if curr_bbox is not None:
+                    x1, y1, x2, y2 = curr_bbox
+                    # วาดกรอบสี่เหลี่ยมรอบตัวรถ/วัตถุ
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), line_color, 2)
+                    
+                    cls_name = self.history_classes.get(tid, "N/A")
+                    conf_text = f" ({curr_conf * 100:.1f}%)" if curr_conf is not None else ""
+                    label = f"ID:{tid} {cls_name}{conf_text}"
+                    
+                    # วาดพื้นหลังแถบชื่อให้อ่านง่ายขึ้น
+                    (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                    cv2.rectangle(frame, (x1, y1 - h - 5), (x1 + w, y1), line_color, -1)
+                    cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+                # -------------------------------------------------------------
+
                 future_path = []
                 for f in range(frame_idx, frame_idx + lookahead_frames, max(3, self.frame_skip)): 
                     if f in self.history_positions[tid]:
